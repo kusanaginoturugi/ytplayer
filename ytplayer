@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Run directly from a checkout.  This avoids modifying the OS-managed Python.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" exec python -m ytplayer.app

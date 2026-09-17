@@ -1,0 +1,13 @@
+[project]
+name = "ytplayer"
+version = "0.1.0"
+description = "A metadata-driven YouTube music TUI player"
+requires-python = ">=3.11"
+dependencies = ["yt-dlp>=2025.1.15"]
+
+[project.scripts]
+ytplayer = "ytplayer.app:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
