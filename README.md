@@ -33,6 +33,8 @@ python -m venv .venv
 初回起動時に検索語を入力する。履歴DBは `~/.local/share/ytplayer/history.sqlite3` に作られる。
 保存先を変える場合は `YTPLAYER_DATA_DIR=/path/to/data ./ytplayer` を使う。
 
+曲を再生すると、音声だけを `~/Music/ytplayer/` へ保存する。YouTube動画IDを含むファイル名で管理するため、同じ曲は再ダウンロードしない。保存先は `YTPLAYER_MUSIC_DIR=/path/to/music ./ytplayer` で変更できる。ダウンロード元の利用規約と権利条件を守って使うこと。
+
 ## 年齢制限付き動画
 
 年齢制限付き動画は、ログイン済みブラウザの Cookie なしには YouTube 側が再生を許可しない。通常の検索では、その動画だけを自動で飛ばして他の候補を続けて表示する。

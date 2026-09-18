@@ -24,6 +24,7 @@ class Track:
     duration: int | None = None
     thumbnail: str = ""
     chapters: tuple[Chapter, ...] = ()
+    audio_path: str = ""
 
     def facets(self) -> dict[str, str]:
         return {

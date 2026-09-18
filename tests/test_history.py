@@ -2,6 +2,7 @@ from pathlib import Path
 
 from ytplayer.history import History
 from ytplayer.models import Track
+from ytplayer.downloader import existing_audio
 
 
 def track(video_id: str, artist: str = "Ada") -> Track:
@@ -41,3 +42,9 @@ def test_favorite_can_be_added_listed_and_removed(tmp_path: Path) -> None:
     assert history.toggle_favorite(favorite) is False
     assert history.favorites() == []
     history.close()
+
+
+def test_existing_audio_is_matched_by_video_id(tmp_path: Path) -> None:
+    path = tmp_path / "A title [favorite].m4a"
+    path.touch()
+    assert existing_audio(track("favorite"), tmp_path) == path

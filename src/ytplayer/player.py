@@ -19,7 +19,7 @@ class Player:
         self.socket_path.unlink(missing_ok=True)
         command = [
             "mpv", "--no-video", "--force-window=no", "--terminal=no", "--really-quiet",
-            f"--input-ipc-server={self.socket_path}", track.url,
+            f"--input-ipc-server={self.socket_path}", track.audio_path or track.url,
         ]
         # Forward the same opt-in authentication setting to mpv's yt-dlp hook.
         browser = os.environ.get("YTPLAYER_COOKIES_FROM_BROWSER")

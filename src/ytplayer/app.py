@@ -3,9 +3,11 @@ from __future__ import annotations
 import curses
 import os
 import unicodedata
+from dataclasses import replace
 from pathlib import Path
 
 from .artwork import Artwork
+from .downloader import MUSIC_DIR, download_audio
 from .history import History
 from .models import Chapter, Track
 from .player import Player
@@ -285,11 +287,18 @@ class App:
             track = details(track)
         except Exception:
             pass  # Search metadata is still enough to play when detail extraction fails.
+        try:
+            self.status = "音声をライブラリへ保存中…"
+            self.draw()
+            track = replace(track, audio_path=str(download_audio(track)))
+        except Exception as exc:
+            self.status = f"音声の保存失敗。ストリーミング再生: {exc}"
         self.player.play(track)
         self.current = track
         self.history.record_play(track, selected)
         source = f"（起点: {selected[0]}）" if selected else ""
-        self.status = f"再生開始: {track.title}{source}"
+        saved = "（保存済み）" if track.audio_path else "（ストリーミング）"
+        self.status = f"再生開始: {track.title}{source} {saved}"
 
     @staticmethod
     def _format_time(seconds: float) -> str:
