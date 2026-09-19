@@ -19,6 +19,12 @@ class Player:
         self.socket_path.unlink(missing_ok=True)
         command = [
             "mpv", "--no-video", "--force-window=no", "--terminal=no", "--really-quiet",
+            "--gapless-audio=yes",
+            # Drop long silent lead-ins, tails, and gaps inside a source.  This
+            # keeps YouTube uploads with padded silence from delaying the next
+            # track; gapless-audio handles the boundary between playlist items.
+            "--af=lavfi=[silenceremove=start_periods=1:start_duration=0.15:start_threshold=-45dB:"
+            "stop_periods=-1:stop_duration=0.5:stop_threshold=-45dB]",
             f"--input-ipc-server={self.socket_path}", track.audio_path or track.url,
         ]
         # Forward the same opt-in authentication setting to mpv's yt-dlp hook.
@@ -33,6 +39,20 @@ class Player:
         self.process = subprocess.Popen(
             command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+
+    def enqueue(self, track: Track) -> bool:
+        """Append one prepared track without interrupting the current one."""
+        return self._command(["loadfile", track.audio_path or track.url, "append-play"]) is not None
+
+    def discard_next(self) -> None:
+        """Remove the one item ytplayer keeps ahead of the current track."""
+        self._command(["playlist-remove", 1])
+
+    def current_path(self) -> str | None:
+        response = self._command(["get_property", "path"], response=True)
+        if isinstance(response, dict) and isinstance(response.get("data"), str):
+            return response["data"]
+        return None
 
     def toggle_pause(self) -> None:
         self._command(["cycle", "pause"])
@@ -55,6 +75,7 @@ class Player:
                     client.sendall(json.dumps({"command": command}).encode() + b"\n")
                     if response:
                         return json.loads(client.recv(4096).decode())
+                    return {}
             except OSError:
                 pass  # mpv has not created its IPC socket yet.
             except (json.JSONDecodeError, TimeoutError):

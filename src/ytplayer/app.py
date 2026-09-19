@@ -3,6 +3,7 @@ from __future__ import annotations
 import curses
 import os
 import unicodedata
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -37,6 +38,11 @@ class App:
         self.artwork = Artwork()
         self.current: Track | None = None
         self.queued: tuple[Track, tuple[str, str] | None] | None = None
+        self.queue_future: Future[Track] | None = None
+        self.queue_enqueued = False
+        self.queue_is_suggestion = False
+        self.suggestion_future: Future[Track | None] | None = None
+        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ytplayer")
         self.retry: tuple[list[Track], str, tuple[str, str] | None, bool] | None = None
         self.status = "s: 検索 / m: メタデータから次曲 / q: 終了"
         curses.curs_set(0)
@@ -47,6 +53,7 @@ class App:
             while True:
                 self.draw()
                 key = self.screen.getch()
+                self.poll_queue()
                 self.advance_if_finished()
                 if key == -1:
                     continue
@@ -71,6 +78,7 @@ class App:
                     self.select_chapter()
         finally:
             self.player.stop()
+            self.executor.shutdown(wait=False, cancel_futures=True)
             self.artwork.clear()
             self.history.close()
 
@@ -100,7 +108,9 @@ class App:
         else:
             self._line(2, "曲を検索して始めよう。")
         if self.queued:
-            self._line(height - 4, f"次の予約: {self.queued[0].title}", curses.A_BOLD)
+            prefix = "次の候補" if self.queue_is_suggestion else "次の予約"
+            state = "（準備中）" if self.queue_future and not self.queue_future.done() else ""
+            self._line(height - 4, f"{prefix}: {self.queued[0].title}{state}", curses.A_BOLD)
         self._line(height - 2, self.status[:width - 1], curses.A_REVERSE)
         retry_hint = "  r 選び直す" if self.retry else ""
         self._line(height - 1, f"s 検索  m 次曲を選ぶ  n 次曲へ  c チャプタ  f お気に入り  l 一覧  p pause{retry_hint}  q 終了")
@@ -229,7 +239,7 @@ class App:
                 queue_after_current = self.current is not None
                 self.retry = (candidates, "再生する曲を選び直す", None, queue_after_current)
                 if queue_after_current:
-                    self.queued = (chosen, None)
+                    self.queue_next(chosen, None)
                     self.status = f"次の曲を予約: {chosen.title}"
                 else:
                     self.play(chosen)
@@ -276,7 +286,7 @@ class App:
             candidates.sort(key=self.history.score, reverse=True)
             chosen = self.choose_track(candidates, "次に予約する曲を選ぶ")
             if chosen:
-                self.queued = (chosen, (field, value))
+                self.queue_next(chosen, (field, value))
                 self.retry = (candidates, "次に予約する曲を選び直す", (field, value), True)
                 self.status = f"次の曲を予約: {chosen.title}（起点: {field}）"
         except Exception as exc:
@@ -296,9 +306,86 @@ class App:
         self.player.play(track)
         self.current = track
         self.history.record_play(track, selected)
+        self.schedule_suggestion(track)
         source = f"（起点: {selected[0]}）" if selected else ""
         saved = "（保存済み）" if track.audio_path else "（ストリーミング）"
         self.status = f"再生開始: {track.title}{source} {saved}"
+
+    @staticmethod
+    def prepare(track: Track) -> Track:
+        """Fetch enough metadata to play, then make the local audio available."""
+        try:
+            track = details(track)
+        except Exception:
+            pass
+        return replace(track, audio_path=str(download_audio(track)))
+
+    @staticmethod
+    def second_candidate(track: Track, recent_ids: set[str]) -> Track | None:
+        candidates = [candidate for candidate in search(track.title) if candidate.id not in recent_ids]
+        if not candidates:
+            return None
+        # The second result is deliberately the provisional choice.  The top
+        # result tends to be the same upload, cover, or a low-value duplicate.
+        return candidates[1] if len(candidates) > 1 else candidates[0]
+
+    def schedule_suggestion(self, track: Track) -> None:
+        """Look up a provisional next track while the current one is playing."""
+        self.queued = None
+        self.queue_future = None
+        self.queue_enqueued = False
+        self.queue_is_suggestion = False
+        recent_ids = self.history.recent_video_ids(100)
+        self.suggestion_future = self.executor.submit(self.second_candidate, track, recent_ids)
+
+    def queue_next(self, track: Track, selected: tuple[str, str] | None, *, suggestion: bool = False) -> None:
+        if self.queue_enqueued:
+            self.player.discard_next()
+        self.queued = (track, selected)
+        self.queue_future = self.executor.submit(self.prepare, track)
+        self.queue_enqueued = False
+        self.queue_is_suggestion = suggestion
+        self.suggestion_future = None
+
+    def poll_queue(self) -> None:
+        """Promote a finished lookup/download without blocking the TUI."""
+        if self.suggestion_future and self.suggestion_future.done():
+            future = self.suggestion_future
+            self.suggestion_future = None
+            try:
+                suggestion = future.result()
+            except Exception:
+                suggestion = None
+            if suggestion and not self.queued:
+                self.queue_next(suggestion, None, suggestion=True)
+                self.status = f"次の候補を準備中: {suggestion.title}"
+
+        if not self.queued or not self.queue_future or not self.queue_future.done():
+            return
+        try:
+            track = self.queue_future.result()
+        except Exception as exc:
+            self.status = f"次曲の準備に失敗: {exc}"
+            self.queued = None
+            self.queue_future = None
+            return
+        selected = self.queued[1]
+        self.queued = (track, selected)
+        if not self.queue_enqueued and self.player.process and not self.player.finished():
+            self.queue_enqueued = self.player.enqueue(track)
+
+    def start_queued_track(self) -> None:
+        assert self.queued
+        track, selected = self.queued
+        self.queued = None
+        self.queue_future = None
+        self.queue_enqueued = False
+        self.queue_is_suggestion = False
+        self.player.play(track)
+        self.current = track
+        self.history.record_play(track, selected)
+        self.schedule_suggestion(track)
+        self.status = f"再生開始: {track.title}（準備済み）"
 
     @staticmethod
     def _format_time(seconds: float) -> str:
@@ -387,14 +474,31 @@ class App:
             self.screen.timeout(250)
 
     def advance_if_finished(self) -> None:
-        if not self.current or not self.player.finished():
+        if not self.current:
+            return
+        if self.queued and self.queue_enqueued:
+            queued_track, selected = self.queued
+            if self.player.current_path() == (queued_track.audio_path or queued_track.url):
+                self.current = queued_track
+                self.queued = None
+                self.queue_future = None
+                self.queue_enqueued = False
+                self.queue_is_suggestion = False
+                self.history.record_play(queued_track, selected)
+                self.schedule_suggestion(queued_track)
+                self.status = f"再生開始: {queued_track.title}（曲間なし）"
+                return
+        if not self.player.finished():
             return
         finished_track = self.current
         self.current = None
         if self.queued:
-            track, selected = self.queued
-            self.queued = None
-            self.play(track, selected)
+            if self.queue_future and not self.queue_future.done():
+                self.status = "次曲を準備中…"
+                return
+            self.start_queued_track()
+        elif self.suggestion_future:
+            self.status = "次の候補を検索中…"
         else:
             self.autoplay_from_title(finished_track)
 
@@ -416,10 +520,13 @@ class App:
             self.status = "次へ進める再生中の曲がない"
             return
         if self.queued:
-            track, selected = self.queued
-            self.queued = None
+            if self.queue_future and not self.queue_future.done():
+                self.status = "次曲を準備中…"
+                return
+            if self.queue_enqueued:
+                self.player.discard_next()
             self.player.stop()
-            self.play(track, selected)
+            self.start_queued_track()
             return
         self.autoplay_from_title(self.current)
 
@@ -432,7 +539,7 @@ class App:
         if not chosen:
             return
         if is_queue:
-            self.queued = (chosen, selected)
+            self.queue_next(chosen, selected)
             self.status = f"次の予約を変更: {chosen.title}"
         else:
             self.play(chosen)
